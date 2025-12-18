@@ -16,22 +16,16 @@ const Controls: React.FC<ControlsProps> = ({
   showTranscript,
   stopSpeaking
 }) => {
-  const isConnected = connectionState === ConnectionState.CONNECTED;
-  const isConnecting = connectionState === ConnectionState.CONNECTING;
-  const isWaiting = connectionState === ConnectionState.WAITING_FOR_WAKE_WORD;
+  const isDisconnected = connectionState === ConnectionState.DISCONNECTED;
+  const isSpeaking = connectionState === ConnectionState.SPEAKING;
 
-  let borderColor = 'border-cyan-500/50';
-  let hoverColor = 'hover:border-cyan-400 hover:bg-cyan-900/20';
-  let iconColor = 'text-cyan-500';
-
-  if (isConnected) {
-    borderColor = 'border-red-500/50';
-    hoverColor = 'hover:border-red-500 hover:bg-red-900/20';
-    iconColor = 'text-red-500';
-  } else if (isWaiting) {
-    borderColor = 'border-amber-500/50';
-    hoverColor = 'hover:border-amber-500 hover:bg-amber-900/20';
-    iconColor = 'text-amber-500';
+  // Color logic
+  let mainBtnColor = 'border-cyan-500/50 text-cyan-500';
+  let mainBtnBg = 'bg-cyan-500';
+  
+  if (!isDisconnected) {
+      mainBtnColor = 'border-red-500/50 text-red-500';
+      mainBtnBg = 'bg-red-500';
   }
 
   return (
@@ -52,62 +46,51 @@ const Controls: React.FC<ControlsProps> = ({
         </svg>
       </button>
 
-        {/* Main Connect Button */}
+        {/* Main Power/Connect Button */}
       <button
         onClick={toggleSystem}
-        disabled={isConnecting}
         className={`
           relative group flex items-center justify-center w-20 h-20 rounded-full border-2 
-          transition-all duration-300 ${borderColor} ${hoverColor}
-          ${isConnecting ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+          transition-all duration-300 ${mainBtnColor} hover:bg-white/5
         `}
       >
         <div className={`
           absolute inset-0 rounded-full blur-md opacity-20 transition-opacity duration-300
-          ${isConnected ? 'bg-red-500' : isWaiting ? 'bg-amber-500' : 'bg-cyan-500'}
+          ${mainBtnBg}
           group-hover:opacity-40
         `}></div>
         
-        {isConnecting ? (
-            <div className="w-8 h-8 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin"></div>
-        ) : (
-            <svg 
-              className={`w-8 h-8 transition-colors ${iconColor}`} 
-              fill="none" viewBox="0 0 24 24" stroke="currentColor"
-            >
-              {isConnected ? (
-                 // Power Off
-                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              ) : isWaiting ? (
-                 // Mic / Listening Icon
-                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-              ) : (
-                 // Power On
-                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-              )}
-            </svg>
-        )}
+        <svg 
+            className={`w-8 h-8 transition-colors`} 
+            fill="none" viewBox="0 0 24 24" stroke="currentColor"
+        >
+            {!isDisconnected ? (
+                // Power Off
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            ) : (
+                // Power On
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+            )}
+        </svg>
       </button>
 
-      {/* Stop Speaking Button (Visible only when connected) */}
-      {isConnected && (
+      {/* Stop Speaking Button (Visible only when Speaking) */}
+      <div className={`transition-all duration-300 ${isSpeaking ? 'opacity-100 scale-100' : 'opacity-0 scale-50 pointer-events-none'}`}>
          <button
             onClick={stopSpeaking}
             className={`
                 p-4 rounded-full border border-orange-900/50 bg-black/40 backdrop-blur-sm
                 text-orange-500 hover:text-orange-300 hover:border-orange-500 transition-all
             `}
-            title="Stop Speaking"
+            title="Silence"
          >
            <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" clipRule="evenodd" />
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
            </svg>
          </button>
-      )}
+      </div>
       
-      {/* Spacer if not connected to balance layout */}
-      {!isConnected && <div className="w-14"></div>}
     </div>
   );
 };

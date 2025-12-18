@@ -9,18 +9,26 @@ const App: React.FC = () => {
   const { connectionState, toggleSystem, volume, transcripts, stopSpeaking } = useJarvis();
   const [showTranscript, setShowTranscript] = useState(false);
 
-  const isConnected = connectionState === ConnectionState.CONNECTED;
-  const isWaiting = connectionState === ConnectionState.WAITING_FOR_WAKE_WORD;
+  const isDisconnected = connectionState === ConnectionState.DISCONNECTED;
 
   let statusColor = 'text-cyan-700';
   let indicatorColor = 'bg-red-500';
   
-  if (isConnected) {
-      statusColor = 'text-green-500';
-      indicatorColor = 'bg-green-500 shadow-[0_0_10px_#22c55e]';
-  } else if (isWaiting) {
-      statusColor = 'text-amber-500';
-      indicatorColor = 'bg-amber-500 shadow-[0_0_10px_#f59e0b] animate-pulse';
+  // Update indicator based on new offline states
+  if (!isDisconnected) {
+      if (connectionState === ConnectionState.STANDBY) {
+        statusColor = 'text-amber-500';
+        indicatorColor = 'bg-amber-500 shadow-[0_0_10px_#f59e0b]';
+      } else if (connectionState === ConnectionState.LISTENING) {
+        statusColor = 'text-green-500';
+        indicatorColor = 'bg-green-500 shadow-[0_0_10px_#22c55e] animate-pulse';
+      } else if (connectionState === ConnectionState.SPEAKING) {
+        statusColor = 'text-cyan-500';
+        indicatorColor = 'bg-cyan-500 shadow-[0_0_10px_#06b6d4] animate-pulse';
+      } else {
+         statusColor = 'text-purple-500';
+         indicatorColor = 'bg-purple-500';
+      }
   }
 
   return (
@@ -35,7 +43,7 @@ const App: React.FC = () => {
         <div className="flex items-center gap-2 mt-2">
             <div className={`w-2 h-2 rounded-full ${indicatorColor}`}></div>
             <span className={`text-xs font-mono tracking-widest uppercase ${statusColor}`}>
-                {connectionState.replace(/_/g, ' ')}
+                {connectionState.replace(/_/g, ' ')} MODE
             </span>
         </div>
       </div>
@@ -61,10 +69,10 @@ const App: React.FC = () => {
         stopSpeaking={stopSpeaking}
       />
       
-      {/* Error Toast */}
+      {/* Browser Support Warning */}
       {connectionState === ConnectionState.ERROR && (
           <div className="absolute top-20 left-1/2 -translate-x-1/2 bg-red-900/80 border border-red-500 text-red-200 px-6 py-3 rounded-sm backdrop-blur-md z-50 font-mono text-sm">
-             (!) CONNECTION FAILED. CHECK API KEY OR NETWORK.
+             (!) BROWSER SUPPORT ERROR: USE CHROME/EDGE
           </div>
       )}
     </div>

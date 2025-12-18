@@ -1,355 +1,310 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { ConnectionState, TranscriptItem } from '../types';
-import { createBlob, decode, decodeAudioData } from '../utils/audio';
-
-// Constants
-const MODEL_NAME = 'gemini-2.5-flash-native-audio-preview-09-2025';
-const INPUT_SAMPLE_RATE = 16000;
-const OUTPUT_SAMPLE_RATE = 24000;
-const BUFFER_SIZE = 4096;
+import { 
+  playConnectChime, 
+  playDisconnectChime, 
+  playWakeWordDetected, 
+  playSystemStart 
+} from '../utils/soundEffects';
 
 export const useJarvis = () => {
   const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.DISCONNECTED);
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
-  const [volume, setVolume] = useState<number>(0); // 0 to 100
-  const [isWakeWordEnabled, setIsWakeWordEnabled] = useState(false);
+  const [volume, setVolume] = useState<number>(0);
   
-  // Refs for audio context and processing
-  const inputAudioContextRef = useRef<AudioContext | null>(null);
-  const outputAudioContextRef = useRef<AudioContext | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const inputSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const outputNodeRef = useRef<GainNode | null>(null);
-  const nextStartTimeRef = useRef<number>(0);
-  const sessionPromiseRef = useRef<Promise<any> | null>(null);
   const recognitionRef = useRef<any>(null);
-  const audioSourcesRef = useRef<AudioBufferSourceNode[]>([]);
-  
-  // Refs for transcript handling to avoid stale closures in callbacks
-  const currentInputTranscriptionRef = useRef<string>('');
-  const currentOutputTranscriptionRef = useRef<string>('');
-  
-  // Update transcripts state safely
-  const updateTranscripts = useCallback((newTranscript: TranscriptItem) => {
-    setTranscripts(prev => {
-      // Check if we need to update an existing item or add a new one
-      const index = prev.findIndex(t => t.id === newTranscript.id);
-      if (index >= 0) {
-        const updated = [...prev];
-        updated[index] = newTranscript;
-        return updated;
-      }
-      return [...prev, newTranscript];
-    });
+  const synthRef = useRef<SpeechSynthesis>(window.speechSynthesis);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const microphoneStreamRef = useRef<MediaStream | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+
+  // --- 1. Transcript Helper ---
+  const addTranscript = useCallback((text: string, sender: 'user' | 'jarvis') => {
+    setTranscripts(prev => [...prev, {
+        id: Date.now().toString() + sender,
+        sender,
+        text,
+        isComplete: true,
+        timestamp: new Date()
+    }]);
   }, []);
 
-  // Initialize Audio Contexts upfront
-  const ensureAudioContexts = useCallback(() => {
-     if (!inputAudioContextRef.current) {
-         inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: INPUT_SAMPLE_RATE });
-     }
-     if (!outputAudioContextRef.current) {
-         outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: OUTPUT_SAMPLE_RATE });
-     }
-  }, []);
+  // --- 2. The "Brain" (Offline Command Processor) ---
+  const processCommand = useCallback((command: string) => {
+    setConnectionState(ConnectionState.PROCESSING);
+    const lower = command.toLowerCase();
+    let response = "";
 
-  const connect = useCallback(async () => {
-    try {
-      // Stop wake word recognition if running
-      if (recognitionRef.current) {
-          recognitionRef.current.stop();
-          recognitionRef.current = null;
-      }
+    // Simple Rule-Based Logic
+    if (lower.includes('time')) {
+        response = `It is currently ${new Date().toLocaleTimeString()}.`;
+    } else if (lower.includes('date') || lower.includes('day')) {
+        response = `Today is ${new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}.`;
+    } else if (lower.includes('who are you') || lower.includes('identify')) {
+        response = "I am Jarvis. A browser-native offline assistant running on your local machine.";
+    } else if (lower.includes('hello') || lower.includes('hi')) {
+        response = "Greetings. All systems are nominal.";
+    } else if (lower.includes('search for')) {
+        const query = lower.split('search for')[1].trim();
+        response = `Searching the web for ${query}.`;
+        window.open(`https://www.google.com/search?q=${encodeURIComponent(query)}`, '_blank');
+    } else if (lower.includes('open youtube')) {
+        response = "Opening YouTube.";
+        window.open('https://www.youtube.com', '_blank');
+    } else if (lower.includes('stop') || lower.includes('cancel')) {
+        response = "Cancelling.";
+    } else {
+        const fallback = [
+            "I am limited to offline commands, sir.",
+            "I didn't catch that. Could you repeat?",
+            "My processing is local only. I cannot answer complex queries."
+        ];
+        response = fallback[Math.floor(Math.random() * fallback.length)];
+    }
 
-      setConnectionState(ConnectionState.CONNECTING);
-      
-      const apiKey = process.env.API_KEY;
-      if (!apiKey) {
-        throw new Error("API Key not found");
-      }
+    // Add to transcript and Speak
+    addTranscript(response, 'jarvis');
+    speakResponse(response);
+  }, [addTranscript]);
 
-      const ai = new GoogleGenAI({ apiKey });
+  // --- 3. Text To Speech (TTS) ---
+  const speakResponse = (text: string) => {
+    if (synthRef.current.speaking) {
+        synthRef.current.cancel();
+    }
 
-      ensureAudioContexts();
-      
-      // Resume contexts if suspended
-      if (inputAudioContextRef.current?.state === 'suspended') {
-        await inputAudioContextRef.current.resume();
-      }
-      if (outputAudioContextRef.current?.state === 'suspended') {
-        await outputAudioContextRef.current.resume();
-      }
+    const utterance = new SpeechSynthesisUtterance(text);
+    
+    // Attempt to find a good voice
+    const voices = synthRef.current.getVoices();
+    // Prefer Google US English or a generic English voice
+    const preferredVoice = voices.find(v => v.name.includes('Google US English')) || voices.find(v => v.lang === 'en-US');
+    if (preferredVoice) utterance.voice = preferredVoice;
 
-      if (outputAudioContextRef.current && !outputNodeRef.current) {
-          outputNodeRef.current = outputAudioContextRef.current.createGain();
-          outputNodeRef.current.connect(outputAudioContextRef.current.destination);
-      }
+    utterance.pitch = 0.9; // Slightly lower for Jarvis feel
+    utterance.rate = 1.0;
 
-      // Get Microphone Stream
-      streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+    utterance.onstart = () => {
+        setConnectionState(ConnectionState.SPEAKING);
+        simulateSpeakingVolume(); // Visualizer for TTS
+    };
 
-      // Establish Live Connection
-      const sessionPromise = ai.live.connect({
-        model: MODEL_NAME,
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
-          },
-          systemInstruction: `You are Jarvis, a highly intelligent and sophisticated AI assistant. 
-          Your tone is polite, slightly formal, efficient, and precise, reminiscent of a helpful butler. 
-          
-          GUIDELINES:
-          1. **Conciseness**: Keep verbal responses concise and to the point.
-          2. **Complex Answers**: For complex topics or long answers, provide a brief summary first. Then ask if the user wants more details.
-          3. **Lists**: Do not read long lists. Summarize the items.
-          4. **Facts**: Use the Google Search tool for factual queries and current events.
-          
-          Always maintain a helpful demeanor. Do not hallucinate capabilities you do not have.`,
-          tools: [{ googleSearch: {} }],
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-        },
-        callbacks: {
-          onopen: () => {
-            console.log('Jarvis Connected');
-            setConnectionState(ConnectionState.CONNECTED);
-            
-            // Start Audio Input Streaming
-            if (!inputAudioContextRef.current || !streamRef.current) return;
-            
-            inputSourceRef.current = inputAudioContextRef.current.createMediaStreamSource(streamRef.current);
-            scriptProcessorRef.current = inputAudioContextRef.current.createScriptProcessor(BUFFER_SIZE, 1, 1);
-            
-            scriptProcessorRef.current.onaudioprocess = (e) => {
-              const inputData = e.inputBuffer.getChannelData(0);
-              
-              // Calculate volume for visualizer
-              let sum = 0;
-              for (let i = 0; i < inputData.length; i++) {
-                sum += inputData[i] * inputData[i];
-              }
-              const rms = Math.sqrt(sum / inputData.length);
-              setVolume(Math.min(100, rms * 1000)); 
+    utterance.onend = () => {
+        setConnectionState(ConnectionState.STANDBY);
+        setVolume(0);
+        if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+        
+        // Restart listening for wake word/commands loop
+        startListening(); 
+    };
 
-              const pcmBlob = createBlob(inputData);
-              sessionPromiseRef.current?.then(session => {
-                session.sendRealtimeInput({ media: pcmBlob });
-              });
-            };
+    synthRef.current.speak(utterance);
+  };
 
-            inputSourceRef.current.connect(scriptProcessorRef.current);
-            scriptProcessorRef.current.connect(inputAudioContextRef.current.destination);
-          },
-          onmessage: async (message: LiveServerMessage) => {
-            // Handle Audio Output
-            const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-            if (base64Audio && outputAudioContextRef.current && outputNodeRef.current) {
-              const ctx = outputAudioContextRef.current;
-              setVolume(Math.random() * 60 + 20); 
+  // Fake volume visualizer for when the computer is speaking
+  const simulateSpeakingVolume = () => {
+      const animate = () => {
+          // Random fluctuation between 20 and 80
+          const val = Math.random() * 60 + 20;
+          setVolume(val);
+          animationFrameRef.current = requestAnimationFrame(animate);
+      };
+      animate();
+  };
 
-              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-              
-              const audioBuffer = await decodeAudioData(
-                decode(base64Audio),
-                ctx,
-                OUTPUT_SAMPLE_RATE,
-                1
-              );
-              
-              const source = ctx.createBufferSource();
-              source.buffer = audioBuffer;
-              source.connect(outputNodeRef.current);
-              
-              source.onended = () => {
-                  audioSourcesRef.current = audioSourcesRef.current.filter(s => s !== source);
-              };
-              audioSourcesRef.current.push(source);
-              
-              source.start(nextStartTimeRef.current);
-              nextStartTimeRef.current += audioBuffer.duration;
+  // --- 4. Speech Recognition Setup ---
+  const startListening = useCallback(() => {
+    // Safety check for browser support
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+        addTranscript("Speech Recognition not supported in this browser.", 'jarvis');
+        return;
+    }
+
+    // If already running, stop to reset
+    if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch(e) {}
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false; // We want single commands
+    recognition.interimResults = false;
+    recognition.lang = 'en-US';
+
+    recognition.onstart = () => {
+        // If we were just Disconnected, we are now Standing By
+        // If we actively triggered it, we might want to go straight to Listening
+        // For now, let's assume this is the "Passive Listening" loop
+    };
+
+    recognition.onresult = (event: any) => {
+        const transcript = event.results[0][0].transcript;
+        console.log("Heard:", transcript);
+
+        // Simple Wake Word Logic Check
+        // If we are in STANDBY, we look for "Jarvis"
+        // If we are actively LISTENING (triggered by button), we take everything.
+        
+        const lower = transcript.toLowerCase();
+        
+        // Check state inside callback (using ref or functional update if needed, 
+        // but here we just process everything for simplicity or check wake word)
+        if (lower.includes('jarvis')) {
+            playWakeWordDetected();
+            const command = lower.replace('jarvis', '').trim();
+            if (command.length > 0) {
+                // He said "Jarvis [Command]"
+                addTranscript(transcript, 'user');
+                processCommand(command);
+            } else {
+                // He just said "Jarvis"
+                playWakeWordDetected();
+                addTranscript(transcript, 'user');
+                speakResponse("Yes?");
             }
-
-            // Handle Transcriptions
-            const outputTrans = message.serverContent?.outputTranscription;
-            const inputTrans = message.serverContent?.inputTranscription;
-
-            if (outputTrans) {
-              currentOutputTranscriptionRef.current += outputTrans.text;
-              updateTranscripts({
-                id: 'current-jarvis',
-                sender: 'jarvis',
-                text: currentOutputTranscriptionRef.current,
-                isComplete: false,
-                timestamp: new Date()
-              });
-            }
-
-            if (inputTrans) {
-              currentInputTranscriptionRef.current += inputTrans.text;
-              updateTranscripts({
-                id: 'current-user',
-                sender: 'user',
-                text: currentInputTranscriptionRef.current,
-                isComplete: false,
-                timestamp: new Date()
-              });
-            }
-
-            if (message.serverContent?.turnComplete) {
-              if (currentInputTranscriptionRef.current) {
-                 const finalUser: TranscriptItem = {
-                    id: Date.now() + '-user',
-                    sender: 'user',
-                    text: currentInputTranscriptionRef.current,
-                    isComplete: true,
-                    timestamp: new Date()
-                 };
-                 setTranscripts(prev => [...prev.filter(t => t.id !== 'current-user'), finalUser]);
-                 currentInputTranscriptionRef.current = '';
-              }
-              
-              if (currentOutputTranscriptionRef.current) {
-                const finalJarvis: TranscriptItem = {
-                    id: Date.now() + '-jarvis',
-                    sender: 'jarvis',
-                    text: currentOutputTranscriptionRef.current,
-                    isComplete: true,
-                    timestamp: new Date()
-                 };
-                 setTranscripts(prev => [...prev.filter(t => t.id !== 'current-jarvis'), finalJarvis]);
-                 currentOutputTranscriptionRef.current = '';
-                 setTimeout(() => setVolume(0), 500);
-              }
-            }
-          },
-          onclose: () => {
-            console.log('Jarvis Connection Closed');
-            setConnectionState(ConnectionState.DISCONNECTED);
-          },
-          onerror: (err) => {
-            console.error('Jarvis Connection Error', err);
-            setConnectionState(ConnectionState.ERROR);
-          }
+        } else {
+            // Did not hear Jarvis.
+            // If manual mode was implemented we'd process it, but for this loop:
+            // Just ignore and restart (handled by onend)
         }
-      });
-      
-      sessionPromiseRef.current = sessionPromise;
+    };
 
-    } catch (error) {
-      console.error("Failed to connect:", error);
-      setConnectionState(ConnectionState.ERROR);
+    recognition.onerror = (event: any) => {
+        console.error("Speech Error", event.error);
+        if (event.error === 'not-allowed') {
+            setConnectionState(ConnectionState.ERROR);
+        }
+    };
+
+    recognition.onend = () => {
+        // Auto-restart loop if we are connected and not speaking/processing
+        // We use a timeout to prevent rapid-fire loops
+        setTimeout(() => {
+             // We access the *current* state via a ref check or checking synth
+             if (!synthRef.current.speaking && connectionState !== ConnectionState.DISCONNECTED) {
+                 try { recognition.start(); } catch(e) {}
+             }
+        }, 100);
+    };
+
+    recognitionRef.current = recognition;
+    try {
+        recognition.start();
+        setConnectionState(ConnectionState.STANDBY);
+    } catch(e) {
+        console.error("Failed to start recognition", e);
     }
-  }, [updateTranscripts, ensureAudioContexts]);
 
-  const stopSpeaking = useCallback(() => {
-      audioSourcesRef.current.forEach(source => {
-          try { source.stop(); } catch(e) {}
-      });
-      audioSourcesRef.current = [];
-      if (outputAudioContextRef.current) {
-          nextStartTimeRef.current = outputAudioContextRef.current.currentTime;
-      }
-  }, []);
+  }, [addTranscript, processCommand, connectionState]);
 
-  const disconnect = useCallback(async () => {
-    stopSpeaking();
-    if (sessionPromiseRef.current) {
-      // Cleanup Audio
-      if (inputAudioContextRef.current) {
-        await inputAudioContextRef.current.close();
-        inputAudioContextRef.current = null;
-      }
-      if (outputAudioContextRef.current) {
-        await outputAudioContextRef.current.close();
-        outputAudioContextRef.current = null;
-      }
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-        streamRef.current = null;
-      }
-      
-      setConnectionState(ConnectionState.DISCONNECTED);
-      setVolume(0);
-      sessionPromiseRef.current = null;
-    }
-  }, [stopSpeaking]);
+  // --- 5. Manual Activation (Button) ---
+  const activateListening = useCallback(() => {
+     // Stop current loop
+     if (recognitionRef.current) try { recognitionRef.current.stop(); } catch(e) {}
+     if (synthRef.current.speaking) synthRef.current.cancel();
 
-  // Toggle System (Wake Word Logic)
-  const toggleSystem = useCallback(() => {
-      if (connectionState === ConnectionState.CONNECTED || connectionState === ConnectionState.CONNECTING) {
-          disconnect();
-          setIsWakeWordEnabled(false);
-          setConnectionState(ConnectionState.DISCONNECTED);
-      } else {
-          // Start Wake Word Mode
-          setIsWakeWordEnabled(true);
-          ensureAudioContexts(); 
-          setConnectionState(ConnectionState.WAITING_FOR_WAKE_WORD);
-      }
-  }, [connectionState, disconnect, ensureAudioContexts]);
+     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+     const recognition = new SpeechRecognition();
+     recognition.continuous = false;
+     recognition.lang = 'en-US';
 
+     recognition.onstart = () => {
+         setConnectionState(ConnectionState.LISTENING);
+         playConnectChime();
+         setupMicrophoneVisualizer(); // Visualizer for User Voice
+     };
 
-  // Wake Word Effect
-  useEffect(() => {
-      if (connectionState === ConnectionState.WAITING_FOR_WAKE_WORD && isWakeWordEnabled) {
-          const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+     recognition.onresult = (event: any) => {
+         const transcript = event.results[0][0].transcript;
+         addTranscript(transcript, 'user');
+         processCommand(transcript);
+     };
+
+     recognition.onend = () => {
+         cleanupMicrophoneVisualizer();
+         // Don't auto-restart here, processCommand will handle the next step (Speaking) which eventually leads back to Standby
+     };
+
+     recognitionRef.current = recognition;
+     recognition.start();
+
+  }, [addTranscript, processCommand]);
+
+  // --- 6. Microphone Visualizer Helpers ---
+  const setupMicrophoneVisualizer = async () => {
+      try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          microphoneStreamRef.current = stream;
+          audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+          const source = audioContextRef.current.createMediaStreamSource(stream);
+          const analyser = audioContextRef.current.createAnalyser();
+          analyser.fftSize = 256;
+          source.connect(analyser);
+          analyserRef.current = analyser;
           
-          if (!SpeechRecognition) {
-              console.warn("Speech Recognition not supported in this browser.");
-              return;
-          }
-
-          const recognition = new SpeechRecognition();
-          recognition.continuous = true;
-          recognition.interimResults = true; 
-          recognition.lang = 'en-US';
-
-          recognition.onresult = (event: any) => {
-              for (let i = event.resultIndex; i < event.results.length; ++i) {
-                  const transcript = event.results[i][0].transcript.toLowerCase();
-                  if (transcript.includes('jarvis')) {
-                      console.log("Wake Word Detected!");
-                      recognition.stop();
-                      connect(); 
-                      return;
-                  }
-              }
+          const bufferLength = analyser.frequencyBinCount;
+          const dataArray = new Uint8Array(bufferLength);
+          
+          const updateVolume = () => {
+              if (!analyserRef.current) return;
+              analyserRef.current.getByteFrequencyData(dataArray);
+              let sum = 0;
+              for(let i=0; i < bufferLength; i++) { sum += dataArray[i]; }
+              const average = sum / bufferLength;
+              setVolume(average * 2); // Boost a bit
+              animationFrameRef.current = requestAnimationFrame(updateVolume);
           };
-
-          recognition.onend = () => {
-              if (connectionState === ConnectionState.WAITING_FOR_WAKE_WORD && isWakeWordEnabled) {
-                   try {
-                       recognition.start();
-                   } catch(e) {
-                       console.error("Failed to restart recognition", e);
-                   }
-              }
-          };
-
-          try {
-              recognition.start();
-              recognitionRef.current = recognition;
-          } catch(e) {
-              console.error("Recognition start error", e);
-          }
-
-          return () => {
-              if (recognitionRef.current) {
-                  recognitionRef.current.stop();
-                  recognitionRef.current = null;
-              }
-          };
+          updateVolume();
+      } catch (err) {
+          console.error("Mic access denied for visualizer", err);
       }
-  }, [connectionState, isWakeWordEnabled, connect]);
+  };
+
+  const cleanupMicrophoneVisualizer = () => {
+      if (microphoneStreamRef.current) {
+          microphoneStreamRef.current.getTracks().forEach(t => t.stop());
+      }
+      if (audioContextRef.current) {
+          audioContextRef.current.close();
+      }
+      if (animationFrameRef.current) {
+          cancelAnimationFrame(animationFrameRef.current);
+      }
+      setVolume(0);
+  };
+
+  // --- 7. Main Lifecycle Toggle ---
+  const toggleSystem = useCallback(() => {
+    if (connectionState !== ConnectionState.DISCONNECTED) {
+        // Turn Off
+        setConnectionState(ConnectionState.DISCONNECTED);
+        if (recognitionRef.current) try { recognitionRef.current.stop(); } catch(e) {}
+        if (synthRef.current.speaking) synthRef.current.cancel();
+        cleanupMicrophoneVisualizer();
+        playDisconnectChime();
+    } else {
+        // Turn On
+        playSystemStart();
+        // We go to STANDBY (Passive listening for "Jarvis")
+        startListening(); 
+    }
+  }, [connectionState, startListening]);
+
+  const stopSpeaking = () => {
+      if (synthRef.current.speaking) {
+          synthRef.current.cancel();
+          setConnectionState(ConnectionState.STANDBY);
+          setVolume(0);
+      }
+  };
 
   return {
     connectionState,
     toggleSystem,
     volume,
     transcripts,
-    stopSpeaking
+    stopSpeaking,
+    activateListening // Expose this if we want a specific "Listen Now" button interaction
   };
 };

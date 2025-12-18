@@ -8,8 +8,9 @@ export interface TranscriptItem {
 
 export enum ConnectionState {
   DISCONNECTED = 'DISCONNECTED',
-  WAITING_FOR_WAKE_WORD = 'WAITING_FOR_WAKE_WORD',
-  CONNECTING = 'CONNECTING',
-  CONNECTED = 'CONNECTED',
+  STANDBY = 'STANDBY', // Waiting for wake word or button press
+  LISTENING = 'LISTENING', // Actively recording user command
+  PROCESSING = 'PROCESSING', // Thinking/Matching command
+  SPEAKING = 'SPEAKING', // TTS is active
   ERROR = 'ERROR',
 }
